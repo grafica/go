@@ -4,7 +4,45 @@
 
 // Package tls partially implements TLS 1.2, as specified in RFC 5246,
 // and TLS 1.3, as specified in RFC 8446.
+//
+// This package implements the "Encrypted ClientHello (ECH)" extension, as
+// specified by draft-ietf-tls-esni-08. This extension allows the client to
+// encrypt its ClientHello to the public key of an ECH-server provider, known as
+// the client-facing server. If successful, then the client-facing server
+// forwards the decrypted ClientHello to the intended recipient, known as the
+// backend server. The goal of this mechanism is to render indistinguishable
+// connections made to backend servers for which the client-facing server
+// provides the service.
 package tls
+
+// BUG(cjpatton): In order to achieve its security goal, the ECH extension
+// specifies various padding mechanisms to ensure that the length of handshake
+// messages doesn't depend on who terminates the connection. This package does
+// not yet implement these. In particular, the following features are missing:
+//
+//  - Client pads the "server_name" extension of the ClientHelloInner as
+//    described in Section 7.2.
+//
+//  - Server pads Certificate message so as to hide the identity of the backend
+//    server. (The details depends on the resolution to
+//    https://github.com/tlswg/draft-ietf-tls-esni/issues/264.)
+
+// BUG(cjpatton): Another goal of the ECH extension is that connections that use
+// ECH should be indistinguishable from connections that provide covertext in
+// the form of a "dummy" ECH extension. This property is known informally as
+// "don't stick out". Providing this property requires additional padding, which
+// this package does not yet implement. This includes the following:
+//
+//  - The server pads the EncryptedExtensions extension so that ECH rejection
+//    doesn't stick out. (The details depend on the resolution to
+//    https://github.com/tlswg/draft-ietf-tls-esni/issues/264.)
+//
+//  - When computing the dummy ECH, the client chooses a random string for
+//    ClientECH.payload that is the same length as the real ciphertext.
+
+// BUG(cjpatton): Upon rejection, the ECH extension requires the client to abort
+// with an "ech_required" alert, then retry the connection. This package does
+// not implement this behavior.
 
 // BUG(agl): The crypto/tls package only implements some countermeasures
 // against Lucky13 attacks on CBC-mode encryption, and only on SHA1

@@ -136,6 +136,11 @@ func (c *Conn) readClientHello() (*clientHelloMsg, error) {
 		return nil, unexpectedMessageError(clientHello, msg)
 	}
 
+	clientHello, err = c.echAcceptOrBypass(clientHello)
+	if err != nil {
+		return nil, fmt.Errorf("tls: %s", err) // Alert sent.
+	}
+
 	var configForClient *Config
 	originalConfig := c.config
 	if c.config.GetConfigForClient != nil {

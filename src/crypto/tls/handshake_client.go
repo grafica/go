@@ -144,13 +144,22 @@ func (c *Conn) clientHandshake() (err error) {
 	// need to be reset.
 	c.didResume = false
 
-	hello, ecdheParams, err := c.makeClientHello()
+	helloBase, ecdheParams, err := c.makeClientHello()
 	if err != nil {
 		return err
 	}
-	c.serverName = hello.serverName
 
-	cacheKey, session, earlySecret, binderKey := c.loadSession(hello)
+	hello, helloInner, err := c.echOfferOrBypass(helloBase)
+	if err != nil {
+		return err
+	}
+
+	helloResumed := hello
+	if c.ech.st.Offered {
+		helloResumed = helloInner
+	}
+
+	cacheKey, session, earlySecret, binderKey := c.loadSession(helloResumed)
 	if cacheKey != "" && session != nil {
 		defer func() {
 			// If we got a handshake failure when resuming a session, throw away
@@ -201,6 +210,8 @@ func (c *Conn) clientHandshake() (err error) {
 			c:           c,
 			serverHello: serverHello,
 			hello:       hello,
+			helloInner:  helloInner,
+			helloBase:   helloBase,
 			ecdheParams: ecdheParams,
 			session:     session,
 			earlySecret: earlySecret,
@@ -211,6 +222,7 @@ func (c *Conn) clientHandshake() (err error) {
 		return hs.handshake()
 	}
 
+	c.serverName = hello.serverName
 	hs := &clientHandshakeState{
 		c:           c,
 		serverHello: serverHello,
@@ -835,10 +847,14 @@ func (c *Conn) verifyServerCertificate(certificates [][]byte) error {
 	}
 
 	if !c.config.InsecureSkipVerify {
+		dnsName := c.config.ServerName
+		if c.ech.st.Offered && !c.ech.st.Accepted {
+			dnsName = c.serverName
+		}
 		opts := x509.VerifyOptions{
 			Roots:         c.config.RootCAs,
 			CurrentTime:   c.config.time(),
-			DNSName:       c.config.ServerName,
+			DNSName:       dnsName,
 			Intermediates: x509.NewCertPool(),
 		}
 		for _, cert := range certs[1:] {

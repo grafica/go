@@ -10,6 +10,7 @@ import (
 	"crypto/hmac"
 	"crypto/rsa"
 	"errors"
+	"fmt"
 	"hash"
 	"sync/atomic"
 	"time"
@@ -19,19 +20,22 @@ type clientHandshakeStateTLS13 struct {
 	c           *Conn
 	serverHello *serverHelloMsg
 	hello       *clientHelloMsg
+	helloInner  *clientHelloMsg
+	helloBase   *clientHelloMsg
 	ecdheParams ecdheParameters
 
 	session     *ClientSessionState
 	earlySecret []byte
 	binderKey   []byte
 
-	certReq       *certificateRequestMsgTLS13
-	usingPSK      bool
-	sentDummyCCS  bool
-	suite         *cipherSuiteTLS13
-	transcript    hash.Hash
-	masterSecret  []byte
-	trafficSecret []byte // client_application_traffic_secret_0
+	certReq         *certificateRequestMsgTLS13
+	usingPSK        bool
+	sentDummyCCS    bool
+	suite           *cipherSuiteTLS13
+	transcript      hash.Hash
+	transcriptInner hash.Hash
+	masterSecret    []byte
+	trafficSecret   []byte // client_application_traffic_secret_0
 }
 
 // handshake requires hs.c, hs.hello, hs.serverHello, hs.ecdheParams, and,
@@ -58,6 +62,14 @@ func (hs *clientHandshakeStateTLS13) handshake() error {
 	hs.transcript = hs.suite.hash.New()
 	hs.transcript.Write(hs.hello.marshal())
 
+	// When offering ECH, it is not known whether ECH was accepted until the
+	// HelloRetryRequest is processed. In particular, we do not know at this
+	// point if the server used the ClientHelloOuter or the ClientHelloInner.
+	if c.ech.st.Offered {
+		hs.transcriptInner = hs.suite.hash.New()
+		hs.transcriptInner.Write(hs.helloInner.marshal())
+	}
+
 	if bytes.Equal(hs.serverHello.random, helloRetryRequestRandom) {
 		if err := hs.sendDummyChangeCipherSpec(); err != nil {
 			return err
@@ -66,6 +78,21 @@ func (hs *clientHandshakeStateTLS13) handshake() error {
 			return err
 		}
 	}
+
+	// Determine if ECH was accepted.
+	if hs.c.ech.st.Offered {
+		secret := hs.suite.extract(hs.helloInner.random, nil)
+		context := hs.serverHello.random[:24]
+		conf := hs.suite.expandLabel(secret, echTls13LabelAcceptConfirm, context, 8)
+		if bytes.Equal(hs.serverHello.random[24:], conf) {
+			c.ech.st.Accepted = true
+			hs.hello = hs.helloInner
+			hs.transcript = hs.transcriptInner
+		}
+	}
+
+	// Resolve the server name now that ECH acceptance has been determined.
+	c.serverName = hs.hello.serverName
 
 	hs.transcript.Write(hs.serverHello.marshal())
 
@@ -174,6 +201,7 @@ func (hs *clientHandshakeStateTLS13) sendDummyChangeCipherSpec() error {
 // resends hs.hello, and reads the new ServerHello into hs.serverHello.
 func (hs *clientHandshakeStateTLS13) processHelloRetryRequest() error {
 	c := hs.c
+	c.hrrTriggered = true
 
 	// The first ClientHello gets double-hashed into the transcript upon a
 	// HelloRetryRequest. (The idea is that the server might offload transcript
@@ -184,6 +212,14 @@ func (hs *clientHandshakeStateTLS13) processHelloRetryRequest() error {
 	hs.transcript.Write(chHash)
 	hs.transcript.Write(hs.serverHello.marshal())
 
+	if c.ech.st.Offered {
+		chHash = hs.transcriptInner.Sum(nil)
+		hs.transcriptInner.Reset()
+		hs.transcriptInner.Write([]byte{typeMessageHash, 0, 0, uint8(len(chHash))})
+		hs.transcriptInner.Write(chHash)
+		hs.transcriptInner.Write(hs.serverHello.marshal())
+	}
+
 	// The only HelloRetryRequest extensions we support are key_share and
 	// cookie, and clients must abort the handshake if the HRR would not result
 	// in any change in the ClientHello.
@@ -193,7 +229,7 @@ func (hs *clientHandshakeStateTLS13) processHelloRetryRequest() error {
 	}
 
 	if hs.serverHello.cookie != nil {
-		hs.hello.cookie = hs.serverHello.cookie
+		hs.helloBase.cookie = hs.serverHello.cookie
 	}
 
 	if hs.serverHello.serverShare.group != 0 {
@@ -206,7 +242,7 @@ func (hs *clientHandshakeStateTLS13) processHelloRetryRequest() error {
 	// share for it this time.
 	if curveID := hs.serverHello.selectedGroup; curveID != 0 {
 		curveOK := false
-		for _, id := range hs.hello.supportedCurves {
+		for _, id := range hs.helloBase.supportedCurves {
 			if id == curveID {
 				curveOK = true
 				break
@@ -230,11 +266,11 @@ func (hs *clientHandshakeStateTLS13) processHelloRetryRequest() error {
 			return err
 		}
 		hs.ecdheParams = params
-		hs.hello.keyShares = []keyShare{{group: curveID, data: params.PublicKey()}}
+		hs.helloBase.keyShares = []keyShare{{group: curveID, data: params.PublicKey()}}
 	}
 
-	hs.hello.raw = nil
-	if len(hs.hello.pskIdentities) > 0 {
+	hs.helloBase.raw = nil
+	if len(hs.helloBase.pskIdentities) > 0 {
 		pskSuite := cipherSuiteTLS13ByID(hs.session.cipherSuite)
 		if pskSuite == nil {
 			return c.sendAlert(alertInternalError)
@@ -242,23 +278,28 @@ func (hs *clientHandshakeStateTLS13) processHelloRetryRequest() error {
 		if pskSuite.hash == hs.suite.hash {
 			// Update binders and obfuscated_ticket_age.
 			ticketAge := uint32(c.config.time().Sub(hs.session.receivedAt) / time.Millisecond)
-			hs.hello.pskIdentities[0].obfuscatedTicketAge = ticketAge + hs.session.ageAdd
+			hs.helloBase.pskIdentities[0].obfuscatedTicketAge = ticketAge + hs.session.ageAdd
 
 			transcript := hs.suite.hash.New()
 			transcript.Write([]byte{typeMessageHash, 0, 0, uint8(len(chHash))})
 			transcript.Write(chHash)
 			transcript.Write(hs.serverHello.marshal())
-			transcript.Write(hs.hello.marshalWithoutBinders())
+			transcript.Write(hs.helloBase.marshalWithoutBinders())
 			pskBinders := [][]byte{hs.suite.finishedHash(hs.binderKey, transcript)}
-			hs.hello.updateBinders(pskBinders)
+			hs.helloBase.updateBinders(pskBinders)
 		} else {
 			// Server selected a cipher suite incompatible with the PSK.
-			hs.hello.pskIdentities = nil
-			hs.hello.pskBinders = nil
+			hs.helloBase.pskIdentities = nil
+			hs.helloBase.pskBinders = nil
 		}
 	}
 
-	hs.transcript.Write(hs.hello.marshal())
+	var err error
+	hs.hello, hs.helloInner, err = c.echOfferOrBypass(hs.helloBase)
+	if err != nil {
+		return err
+	}
+
 	if _, err := c.writeRecord(recordTypeHandshake, hs.hello.marshal()); err != nil {
 		return err
 	}
@@ -279,6 +320,10 @@ func (hs *clientHandshakeStateTLS13) processHelloRetryRequest() error {
 		return err
 	}
 
+	hs.transcript.Write(hs.hello.marshal())
+	if c.ech.st.Offered {
+		hs.transcriptInner.Write(hs.helloInner.marshal())
+	}
 	return nil
 }
 
@@ -399,6 +444,15 @@ func (hs *clientHandshakeStateTLS13) readServerParameters() error {
 		return errors.New("tls: server advertised unrequested ALPN extension")
 	}
 	c.clientProtocol = encryptedExtensions.alpnProtocol
+
+	// If the server rejects ECH, then it may send retry configurations.
+	if len(encryptedExtensions.encryptedClientHello) > 0 {
+		c.ech.retryConfigs = encryptedExtensions.encryptedClientHello
+		if _, err = UnmarshalECHConfigs(c.ech.retryConfigs); err != nil {
+			c.sendAlert(alertIllegalParameter)
+			return fmt.Errorf("tls: ech: failed to parse retry configs: %s", err)
+		}
+	}
 
 	return nil
 }

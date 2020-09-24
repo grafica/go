@@ -114,6 +114,16 @@ type Conn struct {
 	activeCall int32
 
 	tmp [16]byte
+
+	ech struct {
+		st           ECHStatus
+		retryConfigs []byte // Set by the client and server when ECH rejects
+		hrrPsk       []byte // The HRR pre-shared key, used in case of HRR.
+	}
+
+	// Set by the client and server when an HRR message was sent in this
+	// handshake.
+	hrrTriggered bool
 }
 
 // Access to net.Conn methods.
@@ -1314,6 +1324,7 @@ func (c *Conn) Close() error {
 }
 
 var errEarlyCloseWrite = errors.New("tls: CloseWrite called before handshake complete")
+var errEarlyAbortIfRetryRequired = errors.New("tls: AbortIfRetryRequired called before handshake complete")
 
 // CloseWrite shuts down the writing side of the connection. It should only be
 // called once the handshake has completed and does not call CloseWrite on the
@@ -1407,6 +1418,7 @@ func (c *Conn) connectionStateLocked() ConnectionState {
 	} else {
 		state.ekm = c.ekm
 	}
+	state.ECHStatus = c.ech.st
 	return state
 }
 

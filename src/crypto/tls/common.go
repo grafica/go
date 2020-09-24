@@ -100,6 +100,8 @@ const (
 	extensionSignatureAlgorithmsCert uint16 = 50
 	extensionKeyShare                uint16 = 51
 	extensionRenegotiationInfo       uint16 = 0xff01
+	extensionECHOuterExtensions      uint16 = 0xff04 // draft-ietf-tls-esni-08
+	extensionECH                     uint16 = 0xff08 // draft-ietf-tls-esni-08
 )
 
 // TLS signaling cipher suite values
@@ -212,6 +214,19 @@ const (
 // include downgrade canaries even if it's using its highers supported version.
 var testingOnlyForceDowngradeCanary bool
 
+// testingTriggerHRR causes the server to intentionally trigger a
+// HelloRetryRequest (HRR). This is useful for testing new TLS features that
+// change the HRR codepath.
+var testingTriggerHRR bool
+
+// testingTriggerECHBypassAfterHRR causes the client to bypass ECH after HRR.
+// If available, the client will offer ECH in the first CH only.
+var testingTriggerECHBypassAfterHRR bool
+
+// testingTriggerECHBypassBeforeHRR causes the client to bypass ECH before HRR.
+// The client will offer ECH in the second CH only.
+var testingTriggerECHBypassBeforeHRR bool
+
 // ConnectionState records basic TLS details about the connection.
 type ConnectionState struct {
 	// Version is the TLS version used by the connection (e.g. VersionTLS12).
@@ -278,8 +293,28 @@ type ConnectionState struct {
 	// RFC 7627, and https://mitls.org/pages/attacks/3SHAKE#channelbindings.
 	TLSUnique []byte
 
+	// ECHStatus reports the status of this connection's usage of the ECH
+	// extension.
+	ECHStatus ECHStatus
+
 	// ekm is a closure exposed via ExportKeyingMaterial.
 	ekm func(label string, context []byte, length int) ([]byte, error)
+}
+
+// ECHStatus represents a connection's ECH status.
+type ECHStatus struct {
+	// Offered indicates whether the client offered the ECH extension. Note that
+	// this reports real ECH usage only and does not reflect whether the client
+	// offered a dummy ECH extension.
+	Offered bool
+
+	// Accepted indicates whether the client-facing server accepted ECH for this
+	// connection.
+	Accepted bool
+
+	// Grease indicates whether the client sent a dummy ECH extension instead of
+	// a real one.
+	Grease bool
 }
 
 // ExportKeyingMaterial returns length bytes of exported key material in a new
@@ -674,6 +709,22 @@ type Config struct {
 	// used for debugging.
 	KeyLogWriter io.Writer
 
+	// ECHEnabled determines whether the ECH extension will be used for this
+	// connection.
+	ECHEnabled bool
+
+	// ClientECHConfigs are the parameters used by the client when it offers the
+	// ECH extension. If a suitable configuration is found and the client
+	// supports TLS 1.3, then ECH will be offered in this handshake.
+	ClientECHConfigs []ECHConfig
+
+	// ServerECHProvider is the ECH provider used by the client-facing server
+	// for the ECH extension. If the client offers ECH and TLS 1.3 is
+	// negotiated, then the provider is used to compute the HPKE context
+	// (draft-irtf-cfrg-hpke-05), which in turn is used to decrypt the extension
+	// payload.
+	ServerECHProvider ECHProvider
+
 	// mutex protects sessionTicketKeys and autoSessionTicketKeys.
 	mutex sync.RWMutex
 	// sessionTicketKeys contains zero or more ticket keys. If set, it means the
@@ -760,6 +811,9 @@ func (c *Config) Clone() *Config {
 		DynamicRecordSizingDisabled: c.DynamicRecordSizingDisabled,
 		Renegotiation:               c.Renegotiation,
 		KeyLogWriter:                c.KeyLogWriter,
+		ECHEnabled:                  c.ECHEnabled,
+		ClientECHConfigs:            c.ClientECHConfigs,
+		ServerECHProvider:           c.ServerECHProvider,
 		sessionTicketKeys:           c.sessionTicketKeys,
 		autoSessionTicketKeys:       c.autoSessionTicketKeys,
 	}
