@@ -96,19 +96,33 @@ func (c *Conn) echOfferOrBypass(helloBase *clientHelloMsg) (hello, helloInner *c
 			return nil, nil, errors.New("tls: ech: invalid version for ClientHelloInner")
 		}
 
-		// Prepare the ClientHelloOuter. Generate a fresh message, including a
-		// fresh "random".
-		var err error
+		// Set "random".
+		if c.ech.hrrInnerRandom != nil {
+			// After HRR, use the "random" sent in the first ClientHelloInner.
+			helloInner.random = c.ech.hrrInnerRandom
+		} else {
+			// Generate a fresh "random".
+			helloInner.random = make([]byte, 32)
+			_, err := io.ReadFull(config.rand(), helloInner.random)
+			if err != nil {
+				return nil, nil, errors.New("tls: short read from Rand: " + err.Error())
+			}
+		}
+
+		// Prepare the ClientHelloOuter.
 		hello, _, err = c.makeClientHello(config.MinVersion)
 		if err != nil {
 			return nil, nil, fmt.Errorf("tls: ech: %s", err)
 		}
 
-		// Set "legacy_session_id" to be the same as ClientHelloInner.
-		hello.sessionId = helloInner.sessionId
+		// Set "random".
+		hello.random = helloBase.random
 
-		// Set "key_share" to the same value as ClientHelloInner.
-		hello.keyShares = helloInner.keyShares
+		// Set "legacy_session_id" to be the same as ClientHelloInner.
+		hello.sessionId = helloBase.sessionId
+
+		// Set "key_share" to the same as ClientHelloInner.
+		hello.keyShares = helloBase.keyShares
 
 		// Set "server_name" to be the client-facing server.
 		hello.serverName = hostnameInSNI(string(echConfig.rawPublicName))
@@ -148,6 +162,10 @@ func (c *Conn) echOfferOrBypass(helloBase *clientHelloMsg) (hello, helloInner *c
 		// Update the HRR pre-shared-key. This is used to encrypt the second
 		// ClientHelloInner in case the server sends an HRR.
 		c.ech.hrrPsk = ctx.hrrPsk()
+
+		// Record the "random" sent in the ClientHelloInner. This value will be
+		// used for the second ClientHelloInner in case the server sends an HRR.
+		c.ech.hrrInnerRandom = helloInner.random
 
 		// Offer ECH.
 		c.ech.st.Offered = true

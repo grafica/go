@@ -116,9 +116,10 @@ type Conn struct {
 	tmp [16]byte
 
 	ech struct {
-		st           ECHStatus
-		retryConfigs []byte // Set by the client and server when ECH rejects
-		hrrPsk       []byte // The HRR pre-shared key, used in case of HRR.
+		st             ECHStatus
+		retryConfigs   []byte // Set by the client and server when ECH rejects
+		hrrPsk         []byte // The HRR pre-shared key, used in case of HRR.
+		hrrInnerRandom []byte // The ClientHelloInner.random sent prior to HRR.
 	}
 
 	// Set by the client and server when an HRR message was sent in this

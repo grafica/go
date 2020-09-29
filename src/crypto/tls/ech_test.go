@@ -4,6 +4,7 @@
 package tls
 
 import (
+	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
@@ -151,7 +152,7 @@ func setupEchTest() (clientConfig, serverConfig *Config) {
 		Time: func() time.Time {
 			return echTestNow
 		},
-		Rand:               zeroSource{},
+		Rand:               rand.Reader,
 		CipherSuites:       allCipherSuites(),
 		InsecureSkipVerify: false,
 	}
@@ -202,6 +203,7 @@ type echTestCase struct {
 	expectAccepted            bool
 	expectRejected            bool
 	expectRetryConfigs        bool
+	expectGrease              bool
 	expectBackendServerName   bool
 	clientEnabled             bool
 	clientInvalidConfigs      bool
@@ -228,7 +230,8 @@ var echTestCases = []echTestCase{
 		clientEnabled:           true,
 	},
 	{
-		name:                    "success / bypassed: covertext",
+		name:                    "success / bypassed: grease",
+		expectGrease:            true,
 		expectBackendServerName: true,
 		clientEnabled:           true,
 		clientNoConfigs:         true,
@@ -240,6 +243,7 @@ var echTestCases = []echTestCase{
 	},
 	{
 		name:                    "success / bypassed: client invalid version",
+		expectGrease:            true,
 		expectBackendServerName: true,
 		clientInvalidVersion:    true,
 		clientEnabled:           true,
@@ -280,7 +284,8 @@ var echTestCases = []echTestCase{
 		clientEnabled:           true,
 	},
 	{
-		name:                    "hrr / bypassed",
+		name:                    "hrr / bypassed: grease",
+		expectGrease:            true,
 		expectBackendServerName: true,
 		clientEnabled:           true,
 		clientNoConfigs:         true,
@@ -487,6 +492,10 @@ func TestECHHandshake(t *testing.T) {
 
 		if test.expectRetryConfigs != client.retryConfigs {
 			t.Errorf("test #%d: got retry configs=%v; want %v", i, client.retryConfigs, test.expectRetryConfigs)
+		}
+
+		if test.expectGrease != client.st.Grease {
+			t.Errorf("test #%d: got grease=%v; want %v", i, client.st.Grease, test.expectGrease)
 		}
 
 		if test.expectBackendServerName != (serverName == echTestBackendServerName) {
