@@ -33,7 +33,7 @@ type clientHandshakeState struct {
 	session      *ClientSessionState
 }
 
-func (c *Conn) makeClientHello() (*clientHelloMsg, ecdheParameters, error) {
+func (c *Conn) makeClientHello(minVersion uint16) (*clientHelloMsg, ecdheParameters, error) {
 	config := c.config
 	if len(config.ServerName) == 0 && !config.InsecureSkipVerify {
 		return nil, nil, errors.New("tls: either ServerName or InsecureSkipVerify must be specified in the tls.Config")
@@ -51,7 +51,7 @@ func (c *Conn) makeClientHello() (*clientHelloMsg, ecdheParameters, error) {
 		return nil, nil, errors.New("tls: NextProtos values too large")
 	}
 
-	supportedVersions := config.supportedVersions()
+	supportedVersions := config.supportedVersionsFromMin(minVersion)
 	if len(supportedVersions) == 0 {
 		return nil, nil, errors.New("tls: no supported versions satisfy MinVersion and MaxVersion")
 	}
@@ -144,7 +144,15 @@ func (c *Conn) clientHandshake() (err error) {
 	// need to be reset.
 	c.didResume = false
 
-	helloBase, ecdheParams, err := c.makeClientHello()
+	// Determine the minimum required version for this handshake.
+	minVersion := c.config.MinVersion
+	if c.config.echCanOffer() {
+		// If the ECH extension will be offered in this handshake, then the
+		// ClientHelloInner must not offer TLS 1.2 or below.
+		minVersion = VersionTLS13
+	}
+
+	helloBase, ecdheParams, err := c.makeClientHello(minVersion)
 	if err != nil {
 		return err
 	}

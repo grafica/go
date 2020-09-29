@@ -78,61 +78,51 @@ func (c *Conn) echOfferOrBypass(helloBase *clientHelloMsg) (hello, helloInner *c
 		testingBypass = true
 	}
 
-	// Select an ECH configuration suitable for this connection.
-	var echConfig *ECHConfig
-	for _, conf := range config.ClientECHConfigs {
-		// A suitable configuration is one that offers an HPKE ciphersuite that
-		// is supported by the client and indicates the version of ECH
-		// implemented by this TLS client.
-		if conf.isSupported() && extensionECH == conf.version {
-			echConfig = &conf
-			break
-		}
-	}
-
 	// Decide whether to offer the ECH extension in this connection, If offered,
 	// then hello is set to the ClientHelloOuter and helloInner is set to the
 	// ClientHelloInner.
-	if !testingBypass && echConfig != nil &&
-		config.maxSupportedVersion() >= VersionTLS13 {
-		hello = new(clientHelloMsg)
-		*hello = *helloBase
+	if echConfig := config.echSelectConfig(); echConfig != nil &&
+		!testingBypass && config.MaxVersion >= VersionTLS13 {
+
+		// Prepare the ClientHelloInner.
 		helloInner = new(clientHelloMsg)
 		*helloInner = *helloBase
 
-		// Prepare the ClientHelloOuter.
-		//
-		// Offer an empty "encrypted_client_hello" extension.
+		// Set "encrypted_client_hello" with an empty payload.
 		helloInner.encryptedClientHelloOffered = true
 
-		// Only offer to negotiate TLS 1.3 and above.
-		//
-		// TODO(cjpatton): In the spec, should this be a SHOULD instead of a
-		// MUST? This is tricky fore the client to enforce. In particular, this
-		// implementation still offers cipher suites for TLS 1.2 and below.
-		helloInner.supportedVersions = config.supportedVersionsFromMin(VersionTLS13)
-
-		// Prepare the ClientHelloOuter.
-		//
-		// Set the "server_name" to be the client-facing server.
-		hello.serverName = hostnameInSNI(string(echConfig.rawPublicName))
-
-		// Generate a fresh ClientHelloOuter.random.
-		hello.random = make([]byte, 32)
-		_, err = io.ReadFull(config.rand(), hello.random)
-		if err != nil {
-			return nil, nil, fmt.Errorf("tls: %s", err)
+		// Ensure that only TLS 1.3 and above are offered.
+		if v := helloInner.supportedVersions; v[len(v)-1] < VersionTLS13 {
+			return nil, nil, errors.New("tls: ech: invalid version for ClientHelloInner")
 		}
+
+		// Prepare the ClientHelloOuter. Generate a fresh message, including a
+		// fresh "random".
+		var err error
+		hello, _, err = c.makeClientHello(config.MinVersion)
+		if err != nil {
+			return nil, nil, fmt.Errorf("tls: ech: %s", err)
+		}
+
+		// Set "legacy_session_id" to be the same as ClientHelloInner.
+		hello.sessionId = helloInner.sessionId
+
+		// Set "key_share" to the same value as ClientHelloInner.
+		hello.keyShares = helloInner.keyShares
+
+		// Set "server_name" to be the client-facing server.
+		hello.serverName = hostnameInSNI(string(echConfig.rawPublicName))
 
 		// Prepare the encryption context. Note that c.ech.hrrPsk is initially
 		// nil, meaning no PSK is used for encrypting the first ClientHelloInner
 		// in case of HRR.
 		ctx, enc, err := echConfig.setupClientContext(c.ech.hrrPsk, config.rand())
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("tls: ech: %s", err)
 		}
 
-		// Compress the ClientHelloInner using the "outer_extension" mechanism.
+		// Compress the ClientHelloInner using the "outer_extension" mechanism,
+		// incorporating the "key_share" extension from ClientHelloOuter.
 		//
 		// NOTE(cjpatton): It would be nice to incorporate more extensions, but
 		// "key_share" is the last extension to appear in the ClientHello before
@@ -146,14 +136,12 @@ func (c *Conn) echOfferOrBypass(helloBase *clientHelloMsg) (hello, helloInner *c
 			return nil, nil, errors.New("tls: ech: compression of ClientHelloInner failed")
 		}
 
+		// Set "encrypted_client_hello".
 		var ech echClient
 		ech.handle.suite = ctx.cipherSuite()
 		ech.handle.configId = ctx.configId(echConfig.raw)
 		ech.handle.enc = enc
 		ech.payload = ctx.encrypt(rawCompressedHello)
-
-		// Encrypt the ClientHelloInner and add the ECH extension to the
-		// ClientHelloOuter.
 		hello.encryptedClientHelloOffered = true
 		hello.encryptedClientHello = ech.marshal()
 
@@ -772,8 +760,31 @@ func splitClientHelloExtensions(data []byte) ([]byte, []byte, bool) {
 	return data[:len(data)-len(s)], s, true
 }
 
+func (c *Config) echSelectConfig() *ECHConfig {
+	for _, echConfig := range c.ClientECHConfigs {
+		// A suitable configuration is one that offers an HPKE ciphersuite that
+		// is supported by the client and indicates the version of ECH
+		// implemented by this TLS client.
+		if echConfig.isSupported() && extensionECH == echConfig.version {
+			return &echConfig
+		}
+	}
+	return nil
+}
+
+func (c *Config) echCanOffer() bool {
+	if c == nil {
+		return false
+	}
+
+	return c.ECHEnabled && c.echSelectConfig() != nil && c.MaxVersion >= VersionTLS13
+}
+
 func (c *Config) echCanAccept() bool {
-	return c.ECHEnabled && c.ServerECHProvider != nil && c.maxSupportedVersion() >= VersionTLS13
+	if c == nil {
+		return false
+	}
+	return c.ECHEnabled && c.ServerECHProvider != nil && c.MaxVersion >= VersionTLS13
 }
 
 func (c *Config) supportedVersionsFromMin(minVersion uint16) []uint16 {
