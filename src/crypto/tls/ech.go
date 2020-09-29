@@ -237,6 +237,9 @@ func (c *Conn) echAcceptOrBypass(hello *clientHelloMsg) (*clientHelloMsg, error)
 	}
 
 	// Decide whether to bypass ECH.
+	//
+	// TODO(cjpatton): BLOCKER: Ensure that
+	// https://github.com/tlswg/draft-ietf-tls-esni/pull/311 merges.
 	if !offered || !config.echCanAccept() ||
 		!hello.encryptedClientHelloOffered {
 		if c.hrrTriggered && c.ech.st.Offered {
