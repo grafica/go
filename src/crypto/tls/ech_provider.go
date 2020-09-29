@@ -50,7 +50,26 @@ type ECHProviderResult struct {
 	RetryConfigs []byte
 
 	// Context is the client-facing server's HPKE context. This is set if ECH is
-	// not rejected by the provider and no error was reported.
+	// not rejected by the provider and no error was reported. The data has the
+	// following format (in TLS syntax):
+	//
+	// enum { sender(0), receiver(1) } HpkeRole;
+	//
+	// struct {
+	//     HpkeRole role;
+	//     HpkeKemId kem_id;   // as defined in draft-irtf-cfrg-hpke-05
+	//     HpkeKdfId kdf_id;   // as defined in draft-irtf-cfrg-hpke-05
+	//     HpkeAeadId aead_id; // as defined in draft-irtf-cfrg-hpke-05
+	//     opaque exporter_secret<0..255>;
+	//     opaque key<0..255>;
+	//     opaque nonce<0..255>;
+	//     uint64 seq;
+	// } HpkeContext;
+	//
+	// NOTE(cjpatton): This format is specified neither in the ECH spec nor the
+	// HPKE spec. It is the format chosen for the HPKE implementation that we're
+	// using. See
+	// https://github.com/cisco/go-hpke/blob/9e7d3e90b7c3a5b08f3099c49520c587568c77d6/hpke.go#L198
 	Context []byte
 }
 
@@ -170,7 +189,16 @@ func (keySet *ECHKeySet) GetPublicNames() (names []string, err error) {
 	return keySet.names, nil
 }
 
-// ECHKey represents an ECH key and its corresponding configuration.
+// ECHKey represents an ECH key and its corresponding configuration. The
+// encoding of an ECHKey has following structure (in TLS syntax):
+//
+// struct {
+//     opaque key<0..2^16-1>
+//     uint16 length<0..2^16-1> // length of config
+//     ECHConfig config;        // as defined in draft-ietf-tls-esni-08
+// } ECHKey;
+//
+// NOTE(cjpatton): This format is not specified in the ECH draft.
 type ECHKey struct {
 	config ECHConfig
 	sk     hpke.KEMPrivateKey
